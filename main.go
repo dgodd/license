@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,11 +15,37 @@ import (
 	"github.com/ryanuber/go-license"
 )
 
-// /home/dgodd/go/src/github.com/buildpack/pack
+func directMods(path string) (map[string]struct{}, error) {
+	mods := make(map[string]struct{})
+	txt, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	inRequire := false
+	for _, line := range strings.Split(string(txt), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "require (" {
+			inRequire = true
+			continue
+		}
+		if line == ")" {
+			inRequire = false
+			continue
+		}
+		if inRequire {
+			a := strings.Split(line, " ")
+			if len(a) == 2 {
+				mods[a[0]] = struct{}{}
+			}
+		}
+	}
+	return mods, nil
+}
 
-func goModDirs() (map[string]string, error) {
+func allModDirs(path string) (map[string]string, error) {
 	cmd := exec.Command("go", "mod", "graph")
 	cmd.Env = append(os.Environ(), "GO111MODULE=on")
+	cmd.Dir = path
 	txt, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -102,19 +129,34 @@ func printTable(m map[string]string) {
 }
 
 func main() {
-	mods, err := goModDirs()
+	// direct, err := directMods()
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	gomods, err := filepath.Glob("*/go.mod")
 	if err != nil {
 		panic(err)
+	}
+	allmods := make(map[string]string)
+	for _, gomod := range gomods {
+		mods, err := allModDirs(filepath.Dir(gomod))
+		if err != nil {
+			panic(err)
+		}
+		for k, v := range mods {
+			allmods[k] = v
+		}
 	}
 
 	licenses := make(map[string]string)
 	notfound := make(map[string]string)
 
-	for name, dir := range mods {
+	for name, dir := range allmods {
 		l, err := license.NewFromDir(dir)
 		if err != nil {
 			if ghl, err2 := licenseFromGithub(name); err2 == nil {
-				licenses[name] = ghl + " (GH)"
+				licenses[name] = ghl
 			} else if os.IsNotExist(err) {
 				notfound[name] = "NOT FOUND"
 			} else {
@@ -125,9 +167,34 @@ func main() {
 		}
 	}
 
-	printTable(licenses)
-	if len(notfound) > 0 {
+	fmt.Println("# Direct gomod dependencies")
+	for _, gomod := range gomods {
 		fmt.Println("")
-		printTable(notfound)
+		fmt.Println("## ", filepath.Base(filepath.Dir(gomod)))
+		direct, err := directMods(gomod)
+		if err != nil {
+			panic(err)
+		}
+		printed := make(map[string]bool)
+		for _, name := range sortedKeys(licenses) {
+			short := strings.Split(name, "@")[0]
+			if !printed[short+licenses[name]] {
+				if _, ok := direct[short]; ok {
+					fmt.Printf("- [https://%s](%s) (%s)\n", short, short, licenses[name])
+				}
+			}
+			printed[short+licenses[name]] = true
+		}
+	}
+
+	fmt.Println("")
+	fmt.Println("# Consolidated go mod graph dependencies")
+	printed := make(map[string]bool)
+	for _, name := range sortedKeys(licenses) {
+		short := strings.Split(name, "@")[0]
+		if !printed[short+licenses[name]] {
+			fmt.Printf("- [%s](https://%s) (%s)\n", short, short, licenses[name])
+		}
+		printed[short+licenses[name]] = true
 	}
 }
